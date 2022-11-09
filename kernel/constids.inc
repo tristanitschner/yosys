@@ -261,3 +261,6 @@ X(WR_WIDE_CONTINUATION)
 X(X)
 X(Y)
 X(Y_WIDTH)
+
+X(mmi)
+X(mmi_swizzle)

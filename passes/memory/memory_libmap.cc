@@ -39,6 +39,7 @@ struct PassOptions {
 	bool no_auto_distributed;
 	bool no_auto_block;
 	bool no_auto_huge;
+	bool use_mmi;
 	double logic_cost_rom;
 	double logic_cost_ram;
 };
@@ -178,6 +179,7 @@ struct MemMapping {
 	bool logic_ok;
 	double logic_cost;
 	RamKind kind;
+	bool use_mmi;
 	std::string style;
 	dict<int, int> wr_en_cache;
 	dict<std::pair<int, int>, bool> wr_implies_rd_cache;
@@ -185,6 +187,7 @@ struct MemMapping {
 	dict<std::pair<int, int>, bool> wr_excludes_srst_cache;
 
 	MemMapping(MapWorker &worker, Mem &mem, const Library &lib, const PassOptions &opts) : worker(worker), qcsat(worker.modwalker), mem(mem), lib(lib), opts(opts) {
+		use_mmi = opts.use_mmi;
 		determine_style();
 		logic_ok = determine_logic_ok();
 		if (GetSize(mem.wr_ports) == 0)
@@ -333,6 +336,18 @@ void MemMapping::dump_configs(int stage) {
 	}
 }
 
+std::string swizzle2string(std::vector<int> swizzle) 
+{
+	std::stringstream os;
+	for (int x: swizzle)
+		if (x == -1)
+			os << ".-";
+		else
+			os << "." << x;
+	std::string swizzle_s = os.str();
+	return swizzle_s.erase(0,1);
+}
+
 void MemMapping::dump_config(MemConfig &cfg) {
 	log_debug("- %s:\n", log_id(cfg.def->id));
 	for (auto &it: cfg.def->options)
@@ -432,6 +447,10 @@ void MemMapping::determine_style() {
 	if (mem.get_bool_attribute(ID::lram)) {
 		kind = RamKind::Huge;
 		return;
+	}
+	if (mem.get_bool_attribute(ID::mmi)) { // FIXME not working
+		log_debug("Using mmi attributes.\n");
+		use_mmi = true;
 	}
 	for (auto attr: {ID::ram_block, ID::rom_block, ID::ram_style, ID::rom_style, ID::ramstyle, ID::romstyle, ID::syn_ramstyle, ID::syn_romstyle}) {
 		if (mem.has_attribute(attr)) {
@@ -1903,7 +1922,17 @@ void MemMapping::emit(const MemConfig &cfg) {
 	for (int rp = 0; rp < cfg.repl_port; rp++) {
 		std::vector<Cell *> cells;
 		for (int rd = 0; rd < cfg.repl_d; rd++) {
+			// cell name determines ram position uniquely
 			Cell *cell = mem.module->addCell(stringf("%s.%d.%d", mem.memid.c_str(), rp, rd), cfg.def->id);
+			if (use_mmi) {
+				cell->set_bool_attribute(ID::mmi);
+				if (! (rp || rd)) { // if first ram
+					// write swizzle
+					cell->set_string_attribute(ID::mmi_swizzle, swizzle2string(cfg.swizzle));
+					// (everything else should be derivable)
+					// TODO: also pass size for size check
+				}
+			}
 			if (cfg.def->width_mode == WidthMode::Global)
 				cell->setParam(ID::WIDTH, cfg.def->dbits[cfg.base_width_log2]);
 			if (cfg.def->widthscale) {
@@ -2014,6 +2043,8 @@ struct MemoryLibMapPass : public Pass {
 		log("  -no-auto-huge\n");
 		log("    Disables automatic mapping of given kind of RAMs.  Manual mapping\n");
 		log("    (using ram_style or other attributes) is still supported.\n");
+		log("  -mmi\n");
+		log("    Generate attributes for mmi file creation by nextpnr.\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -2026,6 +2057,7 @@ struct MemoryLibMapPass : public Pass {
 		opts.no_auto_huge = false;
 		opts.logic_cost_ram = 1.0;
 		opts.logic_cost_rom = 1.0/16.0;
+		opts.use_mmi = false;
 		log_header(design, "Executing MEMORY_LIBMAP pass (mapping memories to cells).\n");
 
 		size_t argidx;
@@ -2048,6 +2080,10 @@ struct MemoryLibMapPass : public Pass {
 			}
 			if (args[argidx] == "-no-auto-huge") {
 				opts.no_auto_huge = true;
+				continue;
+			}
+			if (args[argidx] == "-mmi") {
+				opts.use_mmi = true;
 				continue;
 			}
 			if (args[argidx] == "-logic-cost-rom" && argidx+1 < args.size()) {
